@@ -5,9 +5,12 @@ import os
 import json
 import re
 
-app = FastAPI()
+app = FastAPI(title="Invoice Extractor")
 
-client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+client = OpenAI(
+    api_key=os.environ["AIPIPE_TOKEN"],
+    base_url="https://aipipe.org/openrouter/v1"
+)
 
 class InvoiceRequest(BaseModel):
     text: str
@@ -18,54 +21,59 @@ class InvoiceResponse(BaseModel):
     currency: str
     date: str
 
+
 @app.post("/extract", response_model=InvoiceResponse)
 def extract(req: InvoiceRequest):
 
-    if not req.text.strip():
-        raise HTTPException(status_code=422, detail="Empty text")
+    if not req.text or not req.text.strip():
+        raise HTTPException(status_code=422, detail="Empty input")
 
     prompt = f"""
-Extract the invoice fields.
+Extract the following invoice information.
 
-Return ONLY JSON.
+Return ONLY valid JSON.
 
 Schema:
 
 {{
-"vendor":"",
-"amount":0,
-"currency":"USD",
-"date":"YYYY-MM-DD"
+  "vendor":"",
+  "amount":0,
+  "currency":"USD",
+  "date":"YYYY-MM-DD"
 }}
 
-Invoice:
+Invoice Text:
 
 {req.text}
 """
 
-    response = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[
-            {
-                "role":"user",
-                "content":prompt
-            }
-        ],
-        temperature=0
-    )
+    try:
+        response = client.chat.completions.create(
+            model="openai/gpt-4.1-nano",
+            temperature=0,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        )
 
-    content = response.choices[0].message.content
+        content = response.choices[0].message.content
 
-    match = re.search(r"\{.*\}", content, re.S)
+        match = re.search(r"\{.*\}", content, re.DOTALL)
 
-    if not match:
-        raise HTTPException(status_code=500, detail="Invalid model output")
+        if not match:
+            raise Exception("No JSON returned")
 
-    data = json.loads(match.group())
+        data = json.loads(match.group())
 
-    return InvoiceResponse(
-        vendor=data["vendor"],
-        amount=float(data["amount"]),
-        currency=data["currency"].upper(),
-        date=data["date"]
-    )
+        return InvoiceResponse(
+            vendor=str(data.get("vendor", "")),
+            amount=float(data.get("amount", 0)),
+            currency=str(data.get("currency", "")).upper(),
+            date=str(data.get("date", ""))
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
