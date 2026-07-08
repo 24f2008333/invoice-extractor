@@ -1,16 +1,16 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import requests
+from openai import OpenAI
+import os
 import json
 import re
-from datetime import datetime
 
-app = FastAPI(title="Invoice Extractor")
+app = FastAPI()
 
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 class InvoiceRequest(BaseModel):
     text: str
-
 
 class InvoiceResponse(BaseModel):
     vendor: str
@@ -18,63 +18,24 @@ class InvoiceResponse(BaseModel):
     currency: str
     date: str
 
-
-OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = "llama3.2"
-
-
-def normalize_date(date_str):
-    try:
-        dt = datetime.strptime(date_str.strip(), "%Y-%m-%d")
-        return dt.strftime("%Y-%m-%d")
-    except:
-        pass
-
-    patterns = [
-        "%d/%m/%Y",
-        "%m/%d/%Y",
-        "%d-%m-%Y",
-        "%d %B %Y",
-        "%B %d %Y"
-    ]
-
-    for p in patterns:
-        try:
-            dt = datetime.strptime(date_str.strip(), p)
-            return dt.strftime("%Y-%m-%d")
-        except:
-            continue
-
-    m = re.search(r"\d{4}-\d{2}-\d{2}", date_str)
-    if m:
-        return m.group()
-
-    return ""
-
-
 @app.post("/extract", response_model=InvoiceResponse)
 def extract(req: InvoiceRequest):
 
     if not req.text.strip():
-        return InvoiceResponse(
-            vendor="",
-            amount=0,
-            currency="USD",
-            date=""
-        )
+        raise HTTPException(status_code=422, detail="Empty text")
 
     prompt = f"""
-Extract invoice information.
+Extract the invoice fields.
 
-Return ONLY valid JSON.
+Return ONLY JSON.
 
-Example:
+Schema:
 
 {{
-"vendor":"Acme Ltd",
-"amount":123.45,
+"vendor":"",
+"amount":0,
 "currency":"USD",
-"date":"2026-04-18"
+"date":"YYYY-MM-DD"
 }}
 
 Invoice:
@@ -82,36 +43,29 @@ Invoice:
 {req.text}
 """
 
-    r = requests.post(
-        OLLAMA_URL,
-        json={
-            "model": MODEL,
-            "prompt": prompt,
-            "stream": False
-        },
-        timeout=60
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {
+                "role":"user",
+                "content":prompt
+            }
+        ],
+        temperature=0
     )
 
-    text = r.json()["response"]
+    content = response.choices[0].message.content
 
-    m = re.search(r"\{.*\}", text, re.S)
+    match = re.search(r"\{.*\}", content, re.S)
 
-    if m:
-        data = json.loads(m.group())
-    else:
-        data = {}
+    if not match:
+        raise HTTPException(status_code=500, detail="Invalid model output")
 
-    vendor = str(data.get("vendor", ""))
-
-    amount = float(data.get("amount", 0))
-
-    currency = str(data.get("currency", "USD")).upper()
-
-    date = normalize_date(str(data.get("date", "")))
+    data = json.loads(match.group())
 
     return InvoiceResponse(
-        vendor=vendor,
-        amount=amount,
-        currency=currency,
-        date=date
+        vendor=data["vendor"],
+        amount=float(data["amount"]),
+        currency=data["currency"].upper(),
+        date=data["date"]
     )
